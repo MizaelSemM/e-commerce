@@ -1,0 +1,321 @@
+# Arquitetura do Projeto — Guia Completo
+
+Este documento explica cada pasta do projeto, o que cada arquivo faz, e principalmente **como eles se conectam** — o caminho que o dado percorre desde o banco Postgres até a tela.
+
+## Visão geral do fluxo
+
+Existem dois fluxos principais no app, e os dois seguem o mesmo padrão:
+
+```
+LEITURA (público / admin listando):
+Postgres → lib/prisma.ts → lib/data/products.ts → app/.../page.tsx (Server Component)
+         → componente client (recebe products via prop) → tela
+
+ESCRITA (admin criando/deletando):
+formulário (client) → app/actions/product-actions.ts (Server Action)
+         → lib/data/products.ts → Postgres → revalidatePath() → tela atualiza
+```
+
+A regra de ouro do projeto: **o Prisma só é importado em arquivos sem `"use client"`** (`lib/data/products.ts` e `app/actions/product-actions.ts`). Nenhum componente client toca no banco diretamente — sempre passa pela Server Action.
+
+---
+
+## `prisma/` — definição do banco de dados
+
+`prisma/schema.prisma` declara as tabelas (models) e os tipos aceitos pelo Postgres. É a fonte de verdade do **banco**.
+
+```prisma
+model Product {
+  id            String        @id @default(uuid())
+  title         String
+  category      Category
+  status        ProductStatus
+  images        String[]
+  price         Float
+  originalPrice Float?
+  sizes         String[]
+  createdAt     DateTime      @default(now())
+}
+```
+
+`prisma.config.ts` (raiz do projeto) diz pro Prisma onde está o schema e de onde vem a `DATABASE_URL` — no Prisma 7 isso não fica mais dentro do `.prisma`, fica nesse arquivo separado:
+
+```ts
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  datasource: { url: env("DATABASE_URL") },
+})
+```
+
+Ninguém importa esses arquivos diretamente no código — eles são lidos pela CLI (`npx prisma generate`, `npx prisma migrate dev`) pra gerar o `@prisma/client` e aplicar mudanças no banco real.
+
+---
+
+## `lib/` — infraestrutura e regras compartilhadas
+
+### `lib/prisma.ts` — a conexão com o banco
+
+```ts
+const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const adapter = new PrismaPg(pool)
+export const prisma = globalForPrisma.prisma ?? new PrismaClient({ adapter })
+```
+
+Esse `prisma` exportado aqui é importado em **um único lugar**: `lib/data/products.ts`. Nenhum outro arquivo do projeto fala com o banco diretamente — essa é a única porta de entrada.
+
+### `lib/schemas/productSchema.ts` — a fonte única de tipos
+
+Aqui é definido, com Zod, o formato exato de um produto válido. Tudo que o resto do app chama de "tipo `Product`" vem daqui:
+
+```ts
+export const productSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  category: categorySchema,
+  status: productStatusSchema,
+  originalPrice: z.number().nullable().optional().transform((v) => v ?? undefined),
+  sizes: z.array(z.union([sneakerSizeSchema, tshirtSizeSchema])).optional(),
+  // ...
+})
+export type Product = z.infer<typeof productSchema>
+```
+
+Note o `.transform()` em `originalPrice`: ele converte o `null` que vem do Postgres em `undefined`, que é o formato que os componentes React esperam (`product.originalPrice && ...`).
+
+### `lib/types.ts` — a porta de entrada pro resto do app
+
+Esse arquivo não define nada por conta própria, só **reexporta** os tipos do schema acima:
+
+```ts
+export type { Category, Product, CreateProductData, /* ... */ } from "@/lib/schemas/productSchema"
+```
+
+Por que essa camada extra existe? Pra que todo componente do app importe de `@/lib/types` (caminho estável e curto), sem precisar saber que por trás disso tem Zod. Se um dia você trocar de Zod pra outra lib de validação, só esse arquivo muda.
+
+### `lib/data/products.ts` — a única ponte com o Prisma
+
+```ts
+import { prisma } from "@/lib/prisma"
+import { productSchema } from "@/lib/schemas/productSchema"
+
+export async function getProducts(): Promise<Product[]> {
+  const products = await prisma.product.findMany({ orderBy: { createdAt: "desc" } })
+  return productSchema.array().parse(products)
+}
+
+export async function createProductInDb(data: CreateProductData) {
+  return prisma.product.create({ data })
+}
+```
+
+Repare: busca no `prisma`, valida com `productSchema.array().parse(...)` (garante que o que sai daqui bate 100% com o tipo `Product`), e devolve. Quem chama essas funções: **Server Components** (`getProducts`, `getProductById`) e **Server Actions** (`createProductInDb`, `deleteProductInDb`).
+
+### `lib/utils.ts`
+
+Tem a função `cn()`, que mescla classes do Tailwind condicionalmente — usada em praticamente todo componente visual (`className={cn("base", condicao && "extra")}`).
+
+---
+
+## `app/actions/` — a ponte segura entre o client e o banco
+
+`product-actions.ts` é onde moram as **Server Actions**: funções que rodam no servidor, mas que um componente `"use client"` pode chamar como se fosse uma função normal.
+
+```ts
+"use server"
+import { createProductInDb, deleteProductInDb } from "@/lib/data/products"
+
+export async function createProduct(data: CreateProductData) {
+  await createProductInDb(data)
+  revalidatePath("/")
+  revalidatePath("/products")
+  revalidatePath("/admin")
+}
+```
+
+`revalidatePath` é a peça que fecha o ciclo: depois de criar/deletar, ele avisa o Next.js "essas páginas estão desatualizadas, busca de novo no banco na próxima visita". Quem chama `createProduct`: o `ProductForm` em `components/admin-components.tsx`.
+
+---
+
+## `app/` — as rotas (cada pasta aqui vira uma URL)
+
+### `app/page.tsx` — rota `/` (home)
+
+```tsx
+import { getProducts } from "@/lib/data/products"
+import { ProductGrid } from "@/components/product-grid"
+
+export default async function HomePage() {
+  const products = await getProducts()
+  return (
+    <div>
+      <Navbar />
+      <HeroSection />
+      <ProductGrid products={products} showAllCategories={false} />
+      <Footer />
+    </div>
+  )
+}
+```
+
+Repare que é `async function` e não tem `"use client"` — isso é um **Server Component**. Ele roda no servidor, busca os produtos direto do banco (via `lib/data/products.ts`) antes de mandar qualquer HTML pro navegador, e passa o resultado pro `ProductGrid` via prop.
+
+### `app/products/page.tsx` + `app/products/products-content.tsx` — rota `/products`
+
+Essa rota é dividida em dois arquivos porque ela precisa de duas coisas que não podem coexistir no mesmo arquivo: buscar do banco (precisa ser servidor) e ler `?category=` da URL (precisa ser client, via `useSearchParams`).
+
+```tsx
+// page.tsx — Server Component, busca no banco
+export default async function ProductsPage() {
+  const products = await getProducts()
+  return <ProductsContent products={products} />
+}
+```
+
+```tsx
+// products-content.tsx — Client Component, lê a URL
+"use client"
+export function ProductsContent({ products }: { products: Product[] }) {
+  const category = useSearchParams().get("category") || "all"
+  return <ProductGrid products={products} showAllCategories initialCategory={category} />
+}
+```
+
+`page.tsx` busca e entrega os dados; `products-content.tsx` decide *qual fatia* desses dados mostrar, com base no clique que veio do `Navbar` (ex: `/products?category=sneakers`).
+
+### `app/admin/page.tsx` — rota `/admin`
+
+```tsx
+export default async function AdminPage() {
+  const products = await getProducts()
+  return <AdminDashboard products={products} />
+}
+```
+
+Mesmo padrão: Server Component fino, só busca e repassa. Toda a lógica visual (abas, formulário, lista) fica no `AdminDashboard`, que é client.
+
+### `app/about/page.tsx` e `app/contact/page.tsx`
+
+Essas duas não buscam nada do banco — são páginas estáticas/client-only com `Navbar` e `Footer`, sem relação com produtos. Por isso não precisaram de nenhuma mudança na refatoração.
+
+### `app/layout.tsx`
+
+O molde que envolve toda página do site (`<html>`, `<body>`, fontes, metadados). Toda `page.tsx` do projeto é renderizada dentro dele.
+
+---
+
+## `components/` — peças visuais reutilizáveis
+
+### `components/admin-dashboard.tsx`
+
+Recebe `products` do `app/admin/page.tsx` e organiza a tela (cards de estatística + abas):
+
+```tsx
+export function AdminDashboard({ products }: { products: Product[] }) {
+  return (
+    <Tabs>
+      <TabsContent value="list">
+        <ProductList products={products} />
+      </TabsContent>
+      <TabsContent value="add">
+        <ProductForm onSuccess={() => setActiveTab("list")} />
+      </TabsContent>
+    </Tabs>
+  )
+}
+```
+
+### `components/admin-components.tsx`
+
+Tem dois componentes: `ProductForm` (formulário de criação) e `ProductList` (lista com botão de deletar). Os dois chamam diretamente as Server Actions de `app/actions/product-actions.ts`:
+
+```tsx
+// dentro do ProductForm
+await createProduct(productData)
+router.refresh() // força o Server Component pai a buscar de novo no banco
+
+// dentro do ProductList
+const handleDelete = async (id: string) => {
+  await deleteProduct(id)
+  router.refresh()
+}
+```
+
+`router.refresh()` é o que faz a tela atualizar sozinha sem F5 manual: ele re-executa o `app/admin/page.tsx` no servidor, que busca os produtos de novo (já refletindo a criação/deleção) e manda o HTML atualizado pro navegador.
+
+### `components/product-grid.tsx`
+
+Recebe `products` (já filtrados por rota, via prop) e cuida só da exibição: grid de cards + filtro por categoria + abrir modal ao clicar.
+
+```tsx
+export function ProductGrid({ products, showAllCategories, initialCategory }: ProductGridProps) {
+  const [selectedCategory, setSelectedCategory] = useState(initialCategory)
+  const filteredProducts = selectedCategory === "all" ? products : products.filter(p => p.category === selectedCategory)
+  // ...
+  return filteredProducts.map(product => (
+    <ProductCard product={product} onClick={() => setSelectedProductId(product.id)} />
+  ))
+}
+```
+
+### `components/product-card.tsx`
+
+O card individual — recebe **um** produto (não array) e uma função `onClick`. Não sabe nada sobre banco, Context ou lista — só desenha o que recebeu:
+
+```tsx
+export function ProductCard({ product, onClick }: ProductCardProps) {
+  return (
+    <Card onClick={onClick}>
+      <Image src={product.images[0]} alt={product.title} fill />
+      <h3>{product.title}</h3>
+      <span>R$ {product.price.toLocaleString("pt-BR")}</span>
+    </Card>
+  )
+}
+```
+
+### `components/product-modal.tsx`
+
+Abre quando `selectedProductId` (estado do `ProductGrid`) não é nulo. Mostra os detalhes completos e o botão "Comprar via WhatsApp". Não precisou de nenhuma mudança na refatoração — já recebia `product` por prop desde o início.
+
+### `components/navbar.tsx`, `footer.tsx`, `hero-section.tsx`, `theme-provider.tsx`
+
+Componentes de UI fixa, sem dependência de banco de dados — só links (`<Link href="/products?category=sneakers">`) e conteúdo estático. Nenhuma mudança necessária.
+
+### `components/ui/`
+
+Biblioteca shadcn/ui — `Button`, `Card`, `Input`, `Select`, `Tabs`, etc. São os blocos de construção (Lego) que todos os componentes acima usam por baixo. Você não edita esses arquivos no dia a dia.
+
+---
+
+## `hooks/`
+
+`use-mobile.ts` detecta tela pequena via JS (usado por componentes que precisam de comportamento diferente no mobile, como o `Sheet` do navbar). `use-toast.ts` é o hook de notificações toast, parte do shadcn/ui.
+
+---
+
+## Raiz do projeto
+
+`package.json` lista as dependências e tem o script `postinstall: "prisma generate"`, que gera o Prisma Client automaticamente toda vez que você roda `npm install`. `tsconfig.json` define o alias `@/*` → raiz do projeto, o que permite todo `import ... from "@/lib/..."` ou `"@/components/..."` funcionar. `.env` guarda a `DATABASE_URL` (nunca vai pro Git).
+
+---
+
+## Resumo do caminho completo (exemplo real)
+
+Quando alguém cadastra um tênis no admin:
+
+1. Usuário preenche o formulário em `components/admin-components.tsx` (`ProductForm`)
+2. Ao submeter, chama `createProduct(data)` de `app/actions/product-actions.ts`
+3. Essa Server Action chama `createProductInDb(data)` de `lib/data/products.ts`
+4. Que usa o `prisma` de `lib/prisma.ts` pra inserir no Postgres
+5. De volta na Server Action, `revalidatePath("/products")` e `revalidatePath("/admin")` marcam essas rotas como desatualizadas
+6. O `ProductForm` chama `router.refresh()`, que re-executa `app/admin/page.tsx`
+7. Esse Server Component chama `getProducts()` de novo, já trazendo o produto novo
+8. O `AdminDashboard` recebe a lista atualizada e repassa pro `ProductList`, que renderiza o card novo
+
+E quando um visitante qualquer acessa `/products?category=sneakers`, sem nenhuma escrita envolvida:
+
+1. `app/products/page.tsx` roda no servidor, chama `getProducts()`
+2. Passa o array completo pro `ProductsContent` (client)
+3. `ProductsContent` lê `?category=sneakers` da URL e repassa como `initialCategory` pro `ProductGrid`
+4. `ProductGrid` filtra o array em memória (sem nova consulta ao banco) e renderiza um `ProductCard` por produto
+5. Clicar num card abre o `ProductModal` com os detalhes daquele produto específico

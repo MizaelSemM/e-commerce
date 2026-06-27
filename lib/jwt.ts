@@ -1,0 +1,1 @@
+//lib/jwt.ts → gerar e validar JWT.

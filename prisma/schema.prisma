@@ -1,0 +1,35 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Category {
+  sneakers
+  tshirts
+  caps
+}
+
+enum ProductStatus {
+  in_stock     @map("in_stock")
+  out_of_stock @map("out_of_stock")
+  new
+}
+
+model Product {
+  id            String        @id @default(uuid())
+  title         String
+  description   String
+  category      Category
+  status        ProductStatus
+  images        String[]
+  price         Float
+  originalPrice Float?
+  sizes         String[]
+  createdAt     DateTime      @default(now())
+}
