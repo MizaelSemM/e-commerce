@@ -1,3 +1,4 @@
+import { Suspense } from "react"
 import { getProducts } from "@/lib/data/products"
 import { Navbar } from "@/components/navbar"
 import { HeroSection } from "@/components/hero-section"
@@ -6,13 +7,14 @@ import { Footer } from "@/components/footer"
 
 export default async function HomePage() {
   const { products } = await getProducts(1, "sneakers")
-
   return (
     <div className="min-h-screen bg-background">
       <Navbar />
       <main>
         <HeroSection />
-        <ProductGrid products={products} showAllCategories={false} />
+        <Suspense fallback={<div>Carregando...</div>}>
+          <ProductGrid products={products} showAllCategories={false} />
+        </Suspense>
       </main>
       <Footer />
     </div>
