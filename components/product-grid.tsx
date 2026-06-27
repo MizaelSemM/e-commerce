@@ -75,7 +75,6 @@ export function ProductGrid({
   const sneakers = products.filter((p) => p.category === "sneakers")
   const filteredProducts = products
   const selectedProduct = products.find((p) => p.id === selectedProductId)
-  const searchParams = useSearchParams()
   const sneakersSection = useInView()
   const filteredSection = useInView()
 
@@ -126,6 +125,7 @@ export function ProductGrid({
     )
   }
 
+  const searchParams = useSearchParams()
   return (
     <>
       <section id="products" className="py-8 border-b border-border bg-background sticky top-[68px] z-40">
