@@ -3,7 +3,7 @@ import { number, optional, z } from "zod"
 export const categorySchema = z.enum(["sneakers", "tshirts", "caps"])
 export const productStatusSchema = z.enum(["in_stock", "out_of_stock", "new"])
 export const sneakerSizeSchema = z.enum(["38", "39", "40", "41", "42", "43", "44"])
-export const tshirtSizeSchema = z.enum(["S", "M", "L", "XL"])
+export const tshirtSizeSchema = z.enum(["S", "M", "L", "XL", "P", "G", "GG"])
 
 export const productSchema = z.object({
   id: z.string(),
