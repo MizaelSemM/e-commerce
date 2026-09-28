@@ -10,18 +10,6 @@
 
 ---
 
-# 📸 Preview
-
-> **Adicione aqui screenshots do projeto**
-
-* 🏠 Home
-* 🛍️ Catálogo de Produtos
-* 🔐 Login Administrativo
-* 📊 Dashboard
-* ✏️ Cadastro/Edição de Produtos
-
----
-
 # 📖 Sobre
 
 Este projeto foi desenvolvido para resolver um cenário comum em pequenos negócios: a necessidade de vender online sem a complexidade de um e-commerce tradicional.
@@ -214,7 +202,7 @@ Responsáveis apenas pela interação do usuário.
 Clone o projeto
 
 ```bash
-git clone https://github.com/seuusuario/repositorio
+git clone https://github.com/MizaelSemM/e-commerce.git
 ```
 
 Instale as dependências
